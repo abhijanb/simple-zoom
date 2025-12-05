@@ -1,143 +1,120 @@
-import React from 'react';
+import React, { useEffect, useState, useContext, useRef } from 'react';
 import { RtcContext } from './RtcContext';
 
 const Zoom = () => {
-  const { peer } = React.useContext(RtcContext);
-  const [remoteDescription, setRemoteDescription] = React.useState('');
-  const [remoteAnswer, setRemoteAnswer] = React.useState('');
-  const [localOffer, setLocalOffer] = React.useState('');
-  const [localAnswer, setLocalAnswer] = React.useState('');
+  const { peer } = useContext(RtcContext);
+  const [socket, setSocket] = useState(null);
+  const [status, setStatus] = useState('Disconnected');
+  const localVideoRef = useRef(null);
+  const remoteVideoRef = useRef(null);
 
-  React.useEffect(() => {
-    if (!peer) return;
+  useEffect(() => {
+    const ws = new WebSocket('ws://localhost:3000');
+    setSocket(ws);
 
-    peer.ontrack = (event) => {
-      const [remoteStream] = event.streams;
-      const remoteVideo = document.getElementById('remoteVideo');
-      if (remoteVideo) {
-        remoteVideo.srcObject = remoteStream;
+    ws.onopen = () => {
+      setStatus('Connected to Server');
+    };
+
+    ws.onmessage = async (event) => {
+      const message = JSON.parse(event.data);
+
+      if (message.type === 'start-call') {
+        setStatus('Call Started (Initiator)');
+        const offer = await peer.createOffer();
+        await peer.setLocalDescription(offer);
+        ws.send(JSON.stringify({ type: 'offer', offer }));
+      } else if (message.type === 'offer') {
+        setStatus('Received Offer');
+        await peer.setRemoteDescription(new RTCSessionDescription(message.offer));
+        const answer = await peer.createAnswer();
+        await peer.setLocalDescription(answer);
+        ws.send(JSON.stringify({ type: 'answer', answer }));
+      } else if (message.type === 'answer') {
+        setStatus('Received Answer');
+        await peer.setRemoteDescription(new RTCSessionDescription(message.answer));
+      } else if (message.type === 'ice-candidate') {
+        if (message.candidate) {
+            try {
+                await peer.addIceCandidate(new RTCIceCandidate(message.candidate));
+            } catch (e) {
+                console.error('Error adding received ice candidate', e);
+            }
+        }
       }
+    };
+
+    return () => {
+      ws.close();
     };
   }, [peer]);
 
-  const handleConnect = async () => {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: true,
-      audio: true,
-    });
+  useEffect(() => {
+    setupMedia();
+  }, [peer]);
 
-    const localVideo = document.getElementById('localVideo');
-    localVideo.srcObject = stream;
+  useEffect(() => {
+    if (!peer || !socket) return;
 
-    stream.getTracks().forEach((track) => {
-      peer.addTrack(track, stream);
-    });
+    peer.onicecandidate = (event) => {
+      if (event.candidate) {
+        socket.send(JSON.stringify({
+          type: 'ice-candidate',
+          candidate: event.candidate
+        }));
+      }
+    };
 
-    const offer = await peer.createOffer();
-    await peer.setLocalDescription(offer);
+    peer.ontrack = (event) => {
+      const [remoteStream] = event.streams;
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = remoteStream;
+      }
+    };
+  }, [peer, socket]);
 
-    setLocalOffer(JSON.stringify(offer));
-  };
-
-  const handleSetRemoteDescription = async () => {
+  const setupMedia = async () => {
     try {
-      const parsed = JSON.parse(remoteDescription);
-      await peer.setRemoteDescription(new RTCSessionDescription(parsed));
-
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true,
       });
 
-      const localVideo = document.getElementById('localVideo');
-      localVideo.srcObject = stream;
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+      }
 
       stream.getTracks().forEach((track) => {
         peer.addTrack(track, stream);
       });
-
-      const answer = await peer.createAnswer();
-      await peer.setLocalDescription(answer);
-      setLocalAnswer(JSON.stringify(answer));
     } catch (err) {
-      console.error('Error setting remote offer:', err);
+      console.error('Error accessing media devices:', err);
     }
   };
 
-  const handleSetAnswer = async () => {
-    try {
-      const answerDesc = new RTCSessionDescription(JSON.parse(remoteAnswer));
-      await peer.setRemoteDescription(answerDesc);
-      console.log('Remote answer set successfully');
-    } catch (err) {
-      console.error('Error setting remote answer:', err);
-    }
-  };
-
-  const copyToClipboard = async (text) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      alert('Copied to clipboard');
-    } catch (err) {
-      alert('Failed to copy');
+  const handleStart = () => {
+    if (socket) {
+      setStatus('Waiting for peer...');
+      socket.send(JSON.stringify({ type: 'start' }));
     }
   };
 
   return (
     <div>
-      <h1>WebRTC React</h1>
-      <button onClick={handleConnect}>Create Offer</button>
-      <br />
-      <video id="localVideo" autoPlay playsInline style={{ width: '300px' }} />
-      <video id="remoteVideo" autoPlay playsInline style={{ width: '300px' }} />
-      <br />
-
-      {/* Local Offer */}
-      {localOffer && (
-        <div>
-          <textarea
-            readOnly
-            value={localOffer}
-            style={{ width: '600px', height: '100px' }}
-          />
-          <br />
-          <button onClick={() => copyToClipboard(localOffer)}>Copy Offer</button>
-        </div>
-      )}
-
-      {/* Remote Description Input */}
-      <textarea
-        placeholder="Paste Offer here"
-        value={remoteDescription}
-        onChange={(e) => setRemoteDescription(e.target.value)}
-        style={{ width: '600px', height: '100px' }}
-      />
-      <br />
-      <button onClick={handleSetRemoteDescription}>Set Remote Offer & Create Answer</button>
+      <h1>WebRTC P2P Video Call</h1>
+      <p>Status: {status}</p>
+      <button onClick={handleStart}>Start Call</button>
       <br /><br />
-
-      {/* Local Answer */}
-      {localAnswer && (
+      <div style={{ display: 'flex', gap: '20px' }}>
         <div>
-          <textarea
-            readOnly
-            value={localAnswer}
-            style={{ width: '600px', height: '100px' }}
-          />
-          <br />
-          <button onClick={() => copyToClipboard(localAnswer)}>Copy Answer</button>
+            <h3>Local</h3>
+            <video ref={localVideoRef} autoPlay playsInline muted style={{ width: '300px', border: '1px solid black' }} />
         </div>
-      )}
-
-      {/* Remote Answer Input */}
-      <textarea
-        placeholder="Paste Answer here"
-        value={remoteAnswer}
-        onChange={(e) => setRemoteAnswer(e.target.value)}
-        style={{ width: '600px', height: '100px' }}
-      />
-      <br />
-      <button onClick={handleSetAnswer}>Set Remote Answer</button>
+        <div>
+            <h3>Remote</h3>
+            <video ref={remoteVideoRef} autoPlay playsInline style={{ width: '300px', border: '1px solid black' }} />
+        </div>
+      </div>
     </div>
   );
 };
